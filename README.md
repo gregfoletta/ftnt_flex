@@ -32,8 +32,6 @@ version .1
 - --count - Number of entitlements to create. If not specified, 1 x entitlement will be created.
 - -h|--help - print usage information
 
-# DESCRIPTION
-
 # REQUIREMENTS
 
 You'll need the following modules, preferably installed using the more modern [cpanminus](https://metacpan.org/pod/App::cpanminus):

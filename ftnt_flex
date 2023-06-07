@@ -69,9 +69,6 @@ version .1
 
 =back
 
-
-=head1 DESCRIPTION
-
 =head1 REQUIREMENTS
 
 You'll need the following modules, preferably installed using the more modern L<cpanminus|https://metacpan.org/pod/App::cpanminus>:
