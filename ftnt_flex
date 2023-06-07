@@ -46,7 +46,7 @@ version .1
 
 
     # Create a new entitlement
-    ./ftnt_flex --create_entitlement FGT_UTM_8CPU_5VDOM
+    ./ftnt_flex --new-entitlement FGT_UTM_8CPU_5VDOM
     - Authentication Success
     - New entitlements created successfully
       - Serial: FZVMELTM23000338, Token: 379CDFxxxxxxxxxxxxxx
