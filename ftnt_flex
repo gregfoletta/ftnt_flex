@@ -1,0 +1,305 @@
+#!/usr/bin/env perl
+
+use strict;
+use warnings;
+use 5.010;
+use Pod::Usage;
+use Getopt::Long;
+use Term::ANSIColor;
+use Carp;
+use File::Spec;
+use Mojo::UserAgent;
+
+
+my %args;
+GetOptions(
+    \%args,
+    'username=s',
+    'password=s',
+    'new-entitlement=s',
+    'count=n',
+    'list-configs',
+    'help' => sub { pod2usage(1) }
+) or pod2usage(2);
+
+=pod
+
+=encoding UTF-8
+
+=head1 NAME
+
+ftnt_flex - register new FortiFlex licenses
+
+=head1 VERSION
+
+version .1
+
+=head1 SYNOPSIS
+
+    # List current configurations
+    ./ftnt_flex --list-configs
+    - Authentication Success
+    - Configurations:
+      - FGT_UTM_8CPU_5VDOM (FortiGate-VM)
+      - FWB_2CPU_ADV (FortiWeb-VM)
+      ...
+
+
+    # Create a new entitlement
+    ./ftnt_flex --create_entitlement FGT_UTM_8CPU_5VDOM
+    - Authentication Success
+    - New entitlements created successfully
+      - Serial: FZVMELTM23000338, Token: 379CDFxxxxxxxxxxxxxx
+
+=head1 OPTIONS
+
+=over
+
+=item -u|--username I<user> - the FortiCloud API username
+
+=item -p|--password I<pass> - the FortiCloud API password
+
+=item -l|--list-configs - List current configurations and exit.
+
+=item -n|--new-entitlement <config_name> - Create a new entitlement based on the configuration specified.
+
+=item --count - Number of entitlements to create. If not specified, 1 x entitlement will be created.
+
+=item -h|--help - print usage information
+
+=back
+
+
+=head1 DESCRIPTION
+
+=head1 REQUIREMENTS
+
+You'll need the following modules, preferably installed using the more modern L<cpanminus|https://metacpan.org/pod/App::cpanminus>:
+
+    sh$ cpanm Mojo::UserAgent IO::Socket::SSL
+
+or the old CPAN client:
+
+    sh$ cpan Mojo::UserAgent IO::Socket::SSL
+
+=head1 AUTHENTICATION
+
+The script uses version 3 of the registration API. This uses OAuth tokens generated from IAM API username/passwords. You can create IAM users L<here|https://support.fortinet.com/iam/#/api-user>.
+
+Once you have your credentials, the script will search for them in three places:
+
+=over 
+
+=item In ~/.ftnt/ftnt_cloud_api formatted as <username>:<password>
+
+=over
+
+=item  Lines beginning with '#' are skipped
+
+=back
+
+=item In the environment variabes C<FORTICLOUD_API_USER> and C<FORTICLOUD_API_PASSWORD>
+
+=item In the command line arguments C<-u|--username> and C<-p|--password>.
+
+=back
+
+If the credentials are available in multiple places, local dotfile beats environment variable beats commandline.
+
+Note that the password has an exclaimation mark in it, so be sure to enclose in single quotes if you're using the environment variable or command line methods.
+
+=cut
+
+### Log Helpers###
+
+sub log_output {
+    print STDERR colored('- ', 'bold green');
+    say STDERR join ' ', @_;
+}
+
+sub log_output_prefix {
+    my ($prefix) = shift;
+    print STDERR "$prefix";
+    log_output @_;
+}
+
+sub log_error {
+    say STDERR colored('- '.join(' ', @_), 'bold red');
+    exit(1);
+}
+
+sub log_warning {
+    say STDERR colored('- '.join(' ', @_), 'bold yellow');
+}
+
+# Try and get creds from ~/.ftnt/ftnt_cloud_api
+my %dotfile_creds = dotfile_creds();
+
+# Get our API access token
+my $access_token = forticare_auth(
+    username => $dotfile_creds{username} // $args{username} // $ENV{FORTICLOUD_API_USER},
+    password => $dotfile_creds{password} // $args{password} // $ENV{FORTICLOUD_API_PASSWORD},
+    client_id => $args{client_id} // 'flexvm'
+);
+
+
+my ($flex_serial) = get_flex_programs($access_token);
+my %configs = get_flex_configurations($flex_serial, $access_token);
+
+if ($args{'list-configs'}) {
+    log_output "Configurations:";
+    list_flex_configurations( %configs );
+    exit(0);
+}
+
+if (defined $args{'new-entitlement'}) {
+    my $ent_config = $configs{ $args{'new-entitlement'} }{id};
+    log_error "Not a valid configuration: $args{entitlement}. Use --list-configurations to see a full list" unless defined $ent_config;
+
+    # Count is set to 1 within create_entitlement() if undefined
+    my $e = create_entitlement($access_token, $ent_config, $args{count} );
+
+    for my $entitlement (@{ $e->{entitlements} }) {
+        log_output "New entitlements created successfully";
+        log_output_prefix "  ", "Serial: ". $entitlement->{serialNumber} . ", Token: $entitlement->{token}";
+    }
+}
+
+
+
+sub dotfile_creds {
+    my $cred_path = File::Spec->canonpath( "$ENV{HOME}/.ftnt/ftnt_cloud_api");
+    my %creds;
+
+
+    open(my $fh, "<:encoding(UTF-8)", $cred_path) or return ();
+
+    while (my $line = <$fh>) {
+        next if $line =~ m{^\s*#};
+
+        chomp $line;
+
+        @creds{qw(username password)} = split ':', $line;
+
+        return %creds;
+    }
+}
+
+
+sub forticare_auth {
+    my (%credentials) = @_;
+    
+    my $ua = Mojo::UserAgent->new;
+    my %auth_info = (
+        uri => 'https://customerapiauth.fortinet.com/api/v1/oauth/token/',
+        json => {
+            username => $credentials{username},
+            password => $credentials{password},
+            client_id => $credentials{client_id},
+            grant_type => 'password'
+        }
+    );
+
+    my $res = $ua->post( $auth_info{uri} => json => $auth_info{json} )->result;
+
+    if ($res->is_error) {
+        my $msg;
+        if (defined $res->json->{oauth}) {
+            $msg = join '/', values %{$res->json->{oauth}};
+        } elsif (defined $res->json->{error_message}) {
+            $msg = $res->json->{error_message};
+        } elsif (defined $res->json->{error_description}) {
+            $msg = $res->json->{error_description};
+        } else {
+            $msg = "Unknown Error";
+        }
+            
+        log_error("Authentication Error ". $msg);
+    }
+
+    if (defined $res->{error}) {
+        croak "Could not authenticate: ". $res->{error_description};
+    }
+
+    log_output("Authentication Success");
+
+    return $res->json->{access_token};
+}
+
+sub _fortiflex_api_call {
+    my ($access_token, $path, $payload) = @_;
+
+    my $base_uri = "https://support.fortinet.com/ES/api/fortiflex/v2";
+
+    my $ua = Mojo::UserAgent->new;
+    my $res = $ua->post(
+        $base_uri . $path =>
+        { Authorization => "Bearer $access_token" } =>
+        json => $payload
+    )->result;
+
+    if ($res->is_error) {
+        log_warning("API Error: ".$res->json->{message});
+        next CODE;
+    }
+
+    return $res->json;
+}
+
+
+
+sub get_flex_programs {
+    my ($access_token) = @_;
+
+    my $programs = _fortiflex_api_call($access_token, "/programs/list", {});
+    my @serials = map { $_->{serialNumber} } @{ $programs->{programs} };
+    return @serials;
+}
+
+sub get_flex_configurations {
+    my ($program_serial, $access_token) = @_;
+    my %configs;
+
+    my $configs = _fortiflex_api_call(
+        $access_token,
+        "/configs/list", 
+        { programSerialNumber => $program_serial }
+    );
+    
+    # Pull out the 
+    for my $c(@{ $configs->{configs} }) {
+        $configs{ $c->{name} } = { id => $c->{id}, status => $c->{status}, productType => $c->{productType}{name} };
+    }
+
+    return %configs;
+}
+
+sub list_flex_configurations {
+    my (%configs) = @_;
+
+    for my $config_name (keys %configs) {
+        my $config = $configs{ $config_name };
+        log_output_prefix "  ", "$config_name (". $config->{productType} . ")";
+    }
+}
+
+sub create_entitlement {
+    my ($access_token, $config_id, $count, $description, $folder) = @_;
+
+    $count //= 1;
+    $description //= "Created using ftnt_flex script";
+    $folder //= "My Assets";
+
+    my $res = _fortiflex_api_call(
+        $access_token,
+        "/entitlements/vm/create",
+        {
+            configId => $config_id,
+            count => $count,
+            description => $description,
+            folderPath => $folder
+        }
+    );
+
+    return $res;
+}
